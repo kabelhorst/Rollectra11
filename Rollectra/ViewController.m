@@ -6,6 +6,9 @@
 //  Copyright © 2018 Pwn20wnd. All rights reserved.
 //
 
+#include <sys/stat.h>
+#include <spawn.h>
+#include <sys/attr.h>
 #include <sys/snapshot.h>
 #include <dlfcn.h>
 #import "ViewController.h"
@@ -140,6 +143,91 @@ const char *systemSnapshot(char *bootHash) {
     return [[NSString stringWithFormat:@APPLESNAP @"%s", bootHash] UTF8String];
 }
 
+typedef struct val_attrs {
+    uint32_t          length;
+    attribute_set_t   returned;
+    attrreference_t   name_info;
+} val_attrs_t;
+
+int snapshot_check(const char *vol, const char *name)
+{
+    struct attrlist attr_list = { 0 };
+    
+    attr_list.commonattr = ATTR_BULK_REQUIRED;
+    
+    char *buf = (char*)calloc(2048, sizeof(char));
+    int retcount;
+    int fd = open(vol, O_RDONLY, 0);
+    while ((retcount = fs_snapshot_list(fd, &attr_list, buf, 2048, 0))>0) {
+        char *bufref = buf;
+        
+        for (int i=0; i<retcount; i++) {
+            val_attrs_t *entry = (val_attrs_t *)bufref;
+            if (entry->returned.commonattr & ATTR_CMN_NAME) {
+                printf("%s\n", (char*)(&entry->name_info) + entry->name_info.attr_dataoffset);
+                if (strstr((char*)(&entry->name_info) + entry->name_info.attr_dataoffset, name))
+                    return 1;
+            }
+            bufref += entry->length;
+        }
+    }
+    free(buf);
+    close(fd);
+    
+    if (retcount < 0) {
+        perror("fs_snapshot_list");
+        return -1;
+    }
+    
+    return 0;
+}
+
+// https://github.com/tihmstar/doubleH3lix/blob/4428c660832e98271f5d82f7a9c67e842b814621/doubleH3lix/jailbreak.mm#L645
+
+extern char* const* environ;
+int easyPosixSpawn(NSURL *launchPath,NSArray *arguments) {
+    NSMutableArray *posixSpawnArguments=[arguments mutableCopy];
+    [posixSpawnArguments insertObject:[launchPath lastPathComponent] atIndex:0];
+    
+    int argc=(int)posixSpawnArguments.count+1;
+    printf("Number of posix_spawn arguments: %d\n",argc);
+    char **args=(char**)calloc(argc,sizeof(char *));
+    
+    for (int i=0; i<posixSpawnArguments.count; i++)
+        args[i]=(char *)[posixSpawnArguments[i]UTF8String];
+    
+    printf("File exists at launch path: %d\n",[[NSFileManager defaultManager]fileExistsAtPath:launchPath.path]);
+    printf("Executing %s: %s\n",launchPath.path.UTF8String,arguments.description.UTF8String);
+    
+    posix_spawn_file_actions_t action;
+    posix_spawn_file_actions_init(&action);
+    
+    pid_t pid;
+    int status;
+    status = posix_spawn(&pid, launchPath.path.UTF8String, &action, NULL, args, environ);
+    
+    if (status == 0) {
+        if (waitpid(pid, &status, 0) != -1) {
+            // wait
+        }
+    }
+    
+    posix_spawn_file_actions_destroy(&action);
+    free(args);
+    
+    return status;
+}
+
+int waitForFile(const char *filename) {
+    int rv = 0;
+    rv = access(filename, F_OK);
+    for (int i = 0; !(i >= 100 || rv == 0); i++) {
+        usleep(100000);
+        rv = access(filename, F_OK);
+    }
+    return rv;
+}
+
 #ifdef WANT_CYDIA
 void unjailbreak(int shouldEraseUserData)
 #else    /* !WANT_CYDIA */
@@ -208,9 +296,37 @@ void unjailbreak(mach_port_t tfp0, uint64_t kernel_base, int shouldEraseUserData
     
     // Revert to the system snapshot.
     LOG("%@", NSLocalizedString(@"Reverting to the system snapshot...", nil));
-    rv = fs_snapshot_rename(open("/", O_RDONLY, 0), "orig-fs", systemSnapshot(copyBootHash()), 0);
-    LOG("rv: " "%d" "\n", rv);
-    _assert(rv == 0);
+#ifdef WANT_CYDIA
+    if (kCFCoreFoundationVersionNumber < 1452.23) {
+        if (access("/var/MobileSoftwareUpdate/mnt1", F_OK)) {
+            rv = mkdir("/var/MobileSoftwareUpdate/mnt1", 0755);
+            LOG("rv: " "%d" "\n", rv);
+            _assert(rv == 0);
+        }
+        if (snapshot_check("/", "electra-prejailbreak") == 1) {
+            rv = easyPosixSpawn([NSURL fileURLWithPath:@"/sbin/mount_apfs"], @[@"-s", @"electra-prejailbreak", @"/", @"/var/MobileSoftwareUpdate/mnt1"]);
+        } else if (snapshot_check("/", "orig-fs") == 1) {
+            rv = easyPosixSpawn([NSURL fileURLWithPath:@"/sbin/mount_apfs"], @[@"-s", @"orig-fs", @"/", @"/var/MobileSoftwareUpdate/mnt1"]);
+        } else {
+            rv = easyPosixSpawn([NSURL fileURLWithPath:@"/sbin/mount_apfs"], @[@"-s", [NSString stringWithFormat:@"%s", systemSnapshot(copyBootHash())], @"/", @"/var/MobileSoftwareUpdate/mnt1"]);
+        }
+        LOG("rv: " "%d" "\n", rv);
+        _assert(rv == 0);
+        rv = waitForFile("/var/MobileSoftwareUpdate/mnt1/sbin/launchd");
+        LOG("rv: " "%d" "\n", rv);
+        _assert(rv == 0);
+        rv = easyPosixSpawn([NSURL fileURLWithPath:@"/usr/bin/rsync"], @[@"-vaxcH", @"--progress", @"--delete-after", @"/var/MobileSoftwareUpdate/mnt1/.", @"/"]);
+        LOG("rv: " "%d" "\n", rv);
+        _assert(rv == 0);
+    }
+    else {
+#endif    /* !WANT_CYDIA */
+#ifdef WANT_CYDIA
+        rv = fs_snapshot_rename(open("/", O_RDONLY, 0), "orig-fs", systemSnapshot(copyBootHash()), 0);
+        LOG("rv: " "%d" "\n", rv);
+        _assert(rv == 0);
+    }
+#endif    /* !WANT_CYDIA */
     LOG("%@", NSLocalizedString(@"Successfully put the system snapshot in place, it should revert on the next mount.", nil));
     
 #ifndef WANT_CYDIA
@@ -324,7 +440,11 @@ void unjailbreak(mach_port_t tfp0, uint64_t kernel_base, int shouldEraseUserData
 #ifndef WANT_CYDIA
     [self.QiLinLabel setHidden:NO];
 #endif    /* WANT_CYDIA */
+#ifdef WANT_CYDIA
+    if (kCFCoreFoundationVersionNumber < 1443.00) {
+#else    /* !WANT_CYDIA */
     if (kCFCoreFoundationVersionNumber <= 1451.51) {
+#endif    /* !WANT_CYDIA */
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.unjailbreakButton setEnabled:NO];
             [self.unjailbreakButton setTitle:NSLocalizedString(@"Incompatible version", nil) forState:UIControlStateDisabled];
