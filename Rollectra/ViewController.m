@@ -296,6 +296,10 @@ void unjailbreak(mach_port_t tfp0, uint64_t kernel_base, int shouldEraseUserData
     
     // Revert to the system snapshot.
     LOG("%@", NSLocalizedString(@"Reverting to the system snapshot...", nil));
+    extern int SBDataReset(mach_port_t, int);
+    extern mach_port_t SBSSpringBoardServerPort(void);
+    mach_port_t SpringBoardServerPort = SBSSpringBoardServerPort();
+    _assert(MACH_PORT_VALID(SpringBoardServerPort));
 #ifdef WANT_CYDIA
     if (kCFCoreFoundationVersionNumber < 1452.23) {
         if (access("/var/MobileSoftwareUpdate/mnt1", F_OK)) {
@@ -343,9 +347,7 @@ void unjailbreak(mach_port_t tfp0, uint64_t kernel_base, int shouldEraseUserData
     
     // Erase user data.
     LOG("%@", NSLocalizedString(@"Erasing user data...", nil));
-    extern int SBDataReset(mach_port_t, int);
-    extern mach_port_t SBSSpringBoardServerPort(void);
-    rv = SBDataReset(SBSSpringBoardServerPort(), shouldEraseUserData ? 5 : 1);
+    rv = SBDataReset(SpringBoardServerPort, shouldEraseUserData ? 5 : 1);
     LOG("rv: " "%d" "\n", rv);
     _assert(rv == 0);
     LOG("%@", NSLocalizedString(@"Successfully erased user data.", nil));
